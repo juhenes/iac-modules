@@ -140,6 +140,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: read
     steps:
       - name: Check out main
         uses: actions/checkout@v4
@@ -147,10 +148,20 @@ jobs:
           fetch-depth: 0
 
       - name: Create release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          merging_branch="$(gh api \
+            --header 'Accept: application/vnd.github+json' \
+            "/repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+            --jq '.[0].head.ref')"
+          if [[ -z "$merging_branch" ]]; then
+            echo "Could not identify the pull request branch for $GITHUB_SHA." >&2
+            exit 1
+          fi
           latest_tag="$(git tag --list 'v0.1.*' --sort=-v:refname | head -n 1)"
           if [[ -n "$latest_tag" ]]; then
             patch="${latest_tag##*.}"
@@ -163,5 +174,5 @@ jobs:
             patch=0
           fi
           TAG_NAME="v0.1.$patch"
-          git tag --annotate "$TAG_NAME" "$GITHUB_SHA" --message "Release $TAG_NAME"
+          git tag --annotate "$TAG_NAME" "$GITHUB_SHA" --message "$merging_branch"
           git push origin "$TAG_NAME"

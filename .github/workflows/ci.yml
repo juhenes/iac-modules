@@ -98,16 +98,45 @@ jobs:
             )
           done < <(find examples -name 'terragrunt.hcl' -type f -print)
 
+  changes:
+    name: Detect Terraform changes
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      terraform_changed: ${{ steps.detect.outputs.terraform_changed }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect Terraform changes
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          before="${{ github.event.before }}"
+          if [[ "$before" == "0000000000000000000000000000000000000000" ]]; then
+            before="$(git rev-list --max-parents=0 HEAD)"
+          fi
+          if git diff --quiet "$before" "$GITHUB_SHA" -- terraform/; then
+            echo "terraform_changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "terraform_changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
   tag:
     name: Tag main commit
     if: >
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
-      needs.discover.outputs.modules != '[]'
+      needs.discover.outputs.modules != '[]' &&
+      needs.changes.outputs.terraform_changed == 'true'
     needs:
       - discover
       - terraform
       - terragrunt
+      - changes
     runs-on: ubuntu-latest
     permissions:
       contents: write

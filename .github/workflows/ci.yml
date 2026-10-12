@@ -1,0 +1,138 @@
+name: IaC checks
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    name: Discover Terraform modules
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.modules.outputs.modules }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Find Terraform modules
+        id: modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          modules="$(
+            find terraform -type f -name '*.tf' -not -path '*/.terraform/*' -printf '%h\n' |
+              sort -u |
+              jq --raw-input --slurp --compact-output 'split("\n") | map(select(length > 0))'
+          )"
+          echo "Discovered Terraform modules: $modules"
+          echo "modules=$modules" >> "$GITHUB_OUTPUT"
+
+  terraform:
+    name: Terraform checks
+    if: needs.discover.outputs.modules != '[]'
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.discover.outputs.modules) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9"
+
+      - name: Check formatting
+        run: terraform fmt -check -diff
+
+      - name: Initialize Terraform
+        run: terraform init -backend=false -input=false
+
+      - name: Validate Terraform
+        run: terraform validate
+
+  terragrunt:
+    name: Terragrunt checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9"
+
+      - name: Set up Terragrunt
+        uses: autero1/action-terragrunt@v3
+        with:
+          terragrunt-version: "latest"
+
+      - name: Check Terragrunt formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r file; do
+            example_dir="$(dirname "$file")"
+            (
+              cd "$example_dir"
+              terragrunt hcl format --check
+              terragrunt validate --non-interactive
+            )
+          done < <(find examples -name 'terragrunt.hcl' -type f -print)
+
+  tag:
+    name: Tag main commit
+    if: >
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.discover.outputs.modules != '[]'
+    needs:
+      - discover
+      - terraform
+      - terragrunt
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create release tag
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          latest_tag="$(git tag --list 'v0.1.*' --sort=-v:refname | head -n 1)"
+          if [[ -n "$latest_tag" ]]; then
+            patch="${latest_tag##*.}"
+            if ! [[ "$patch" =~ ^[0-9]+$ ]]; then
+              echo "Latest release tag has an invalid patch version: $latest_tag" >&2
+              exit 1
+            fi
+            patch=$((patch + 1))
+          else
+            patch=0
+          fi
+          TAG_NAME="v0.1.$patch"
+          git tag --annotate "$TAG_NAME" "$GITHUB_SHA" --message "Release $TAG_NAME"
+          git push origin "$TAG_NAME"
